@@ -1,0 +1,14 @@
+{
+  "name": "organ-strip-punch-api",
+  "version": "1.1.0",
+  "description": "零依赖 Node 服务：手摇风琴纸带打孔管理 + 冲孔机台健康监测",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
