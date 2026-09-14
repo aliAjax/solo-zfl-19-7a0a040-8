@@ -202,11 +202,10 @@ function createService(options = {}) {
   }
 
   function machineView(machine) {
-    return {
-      ...health.publicMachine(machine),
-      // 读路径按当前时间投影实时状态，持久化降级由周期扫描负责
-      effectiveStatus: health.effectiveStatus(machine, clock.now())
-    };
+    // 所有读路径统一用 effectiveStatus（维修 > 超时掉线 > 在线）投影出 status，
+    // 持久化状态由 30s 周期扫描和写入路径维护，但筛选/详情/样本查询看到的 status 必须一致：
+    // 不能出现详情已离线而 offline 筛选为空。
+    return { ...health.publicMachine(machine), status: health.effectiveStatus(machine, clock.now()) };
   }
 
   async function handle(req, res) {
@@ -352,8 +351,9 @@ function createService(options = {}) {
 
     if (req.method === "GET" && pathname === "/machines") {
       const status = searchParams.get("status");
+      // 筛选用实时投影状态，与详情保持一致：超时后即使扫描还没跑，offline 筛选也能查到该机台
       let machines = db.machines;
-      if (status) machines = machines.filter((m) => m.status === status);
+      if (status) machines = machines.filter((m) => health.effectiveStatus(m, clock.now()) === status);
       return send(res, 200, { data: machines.map(machineView) });
     }
 
@@ -372,24 +372,34 @@ function createService(options = {}) {
     const samplesMatch = pathname.match(/^\/machines\/([^/]+)\/samples$/);
     if (samplesMatch && req.method === "POST") {
       const body = await parseBody(req);
-      body.machineId = body.machineId ?? samplesMatch[1];
-      const result = await store.update((d) => health.ingestSamples(d, body, clock));
+      const result = await store.update((d) => {
+        // 路径机台编号是唯一归属；body 里带不同编号直接 400
+        health.assertPathOwnsMachine(d, samplesMatch[1], body.machineId);
+        body.machineId = samplesMatch[1];
+        return health.ingestSamples(d, body, clock);
+      });
       return send(res, 200, { data: result });
     }
 
     const maintenanceStartMatch = pathname.match(/^\/machines\/([^/]+)\/maintenance\/start$/);
     if (maintenanceStartMatch && req.method === "POST") {
       const body = await parseBody(req);
-      body.machineId = body.machineId ?? maintenanceStartMatch[1];
-      const result = await store.update((d) => health.startMaintenance(d, body, clock));
+      const result = await store.update((d) => {
+        health.assertPathOwnsMachine(d, maintenanceStartMatch[1], body.machineId);
+        body.machineId = maintenanceStartMatch[1];
+        return health.startMaintenance(d, body, clock);
+      });
       return send(res, 200, { data: result });
     }
 
     const maintenanceEndMatch = pathname.match(/^\/machines\/([^/]+)\/maintenance\/end$/);
     if (maintenanceEndMatch && req.method === "POST") {
       const body = await parseBody(req);
-      body.machineId = body.machineId ?? maintenanceEndMatch[1];
-      const result = await store.update((d) => health.endMaintenance(d, body, clock));
+      const result = await store.update((d) => {
+        health.assertPathOwnsMachine(d, maintenanceEndMatch[1], body.machineId);
+        body.machineId = maintenanceEndMatch[1];
+        return health.endMaintenance(d, body, clock);
+      });
       return send(res, 200, { data: result });
     }
 
@@ -400,11 +410,19 @@ function createService(options = {}) {
         toTs: searchParams.get("to") || undefined
       };
       let list = health.querySamples(db, params);
-      const machineId = params.machineId;
-      if (machineId) {
-        const machine = health.getMachineOrFail(db, machineId);
-        list = list.map((s) => health.publicSample(db, machine, s));
-      }
+      // 机台状态与机台详情/列表筛选同源（effectiveStatus），保证样本查询看到的状态一致
+      const statusById = new Map(
+        db.machines.map((m) => [m.id, health.effectiveStatus(m, clock.now())])
+      );
+      const machineById = new Map(db.machines.map((m) => [m.id, m]));
+      list = list.map((s) => {
+        const machine = machineById.get(s.machineId);
+        return {
+          ...s,
+          machineStatus: statusById.get(s.machineId) ?? "offline",
+          judged: machine ? health.publicSample(db, machine, s).judged : false
+        };
+      });
       return send(res, 200, { data: list });
     }
 

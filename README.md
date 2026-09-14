@@ -53,17 +53,25 @@ npm test                       # node --test test/（41 个用例）
 | 方法 路径 | 说明 |
 | --- | --- |
 | `POST /machines` | 注册机台 `{code,name?,windowSize?,timeoutMs?,thresholds?}` |
-| `GET  /machines?status=` | 机台列表（含实时投影 `effectiveStatus`） |
+| `GET  /machines?status=` | 机台列表（`status` 为实时投影：online/offline/maintenance） |
 | `GET  /machines/:id` | 单机台（:id 为机台 id 或 code） |
-| `POST /machines/:id/samples` | 批次上报 `{batchId, samples:[{ts,seq,tension,holeDiameter,rpm}]}`，返回 `{duplicate,action,faultId,accepted,rejected}`，`action` ∈ `none/created/supplemented/upgraded/deferred/fault_auto_closed` |
-| `POST /machines/:id/maintenance/start` | `{reason?,startedTs?}`；返回被自动关闭的故障 id |
+| `POST /machines/:id/samples` | 批次上报（`:id` 为机台 id 或 code，**路径是机台唯一归属**；若 body 带 `machineId` 必须与路径同一机台，否则 400）。`{batchId, samples:[{ts,seq,tension,holeDiameter,rpm}]}`，返回 `{duplicate,action,faultId,accepted,rejected}`，`action` ∈ `none/created/supplemented/upgraded/deferred/fault_auto_closed` |
+| `POST /machines/:id/maintenance/start` | `{reason?,startedTs?}`；同样以路径为准；返回被自动关闭的故障 id |
 | `POST /machines/:id/maintenance/end` | `{endedTs?}`；返回新窗口下界 `evaluateAfterTs` |
-| `GET  /samples?machineId=&from=&to=` | 样本查询（时间闭区间，按时间排序） |
+| `GET  /samples?machineId=&from=&to=` | 样本查询（时间闭区间，按时间排序；每条附 `machineStatus` 与 `judged`） |
 | `GET  /faults?machineId=&status=&level=&from=&to=` | 故障查询（from 按 lastAt、to 按 startedAt，创建时间倒序） |
 | `GET  /faults/:id` | 单故障（含完整 history） |
 | `POST /faults/:id/confirm` | 确认 `{note?}`（open → confirmed，409 防重复） |
 | `POST /faults/:id/close` | 关闭 `{note?}`（409 防重复） |
 | `POST /admin/sweep` | 立即执行一次掉线扫描 |
+
+### 状态一致性
+
+机台 `status` 在**所有读路径**（列表筛选 `GET /machines?status=`、机台详情、样本查询里的
+`machineStatus`）都由同一个 `effectiveStatus`（维修 > 超时掉线 > 在线）实时投影，单一事实来源：
+超时后即使 30s 周期扫描尚未执行，详情显示 `offline` 时离线筛选必然包含该机台，不会出现
+“详情已离线但离线条目为空”。上报恢复时按同一函数判定，并把状态与该批次在同一次原子写入中落库。
+
 
 ### 示例
 
